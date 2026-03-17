@@ -1,7 +1,8 @@
+import { normalizeText } from './utils/text.util';
+
 /**
  * Heurística: ¿la pregunta pide información enciclopédica y debemos consultar Wikipedia?
  */
-
 const ENCYCLOPEDIC_PATTERNS = [
   /que\s+es\b/i,
   /que\s+son\b/i,
@@ -42,21 +43,14 @@ const ENCYCLOPEDIC_PATTERNS = [
   /cuántos\s+es\s+/i,
 ];
 
-function normalize(text: string): string {
-  return (text ?? '')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/\p{Diacritic}/gu, '');
-}
-
 export function needsWikipedia(question: string): boolean {
-  const n = normalize(question);
+  const n = normalizeText(question);
   return ENCYCLOPEDIC_PATTERNS.some((re) => re.test(n));
 }
 
 export function getSearchQuery(question: string): string {
   const q = (question ?? '').trim();
-  const n = normalize(q);
+  const n = normalizeText(q);
   const rest = n
     .replace(/^(que\s+es\s+(el\s+|la\s+|un\s+|una\s+)?)/i, '')
     .replace(/^(quien\s+(es|fue)\s+)/i, '')
@@ -138,12 +132,6 @@ const RECENT_INFO_PATTERNS = [
 ];
 
 export function needsRecentInfo(question: string): boolean {
-  const n = normalize(question);
+  const n = normalizeText(question);
   return RECENT_INFO_PATTERNS.some((re) => re.test(n));
-}
-
-/** Query para búsqueda web: la pregunta tal cual suele dar buenos resultados. */
-export function getWebSearchQuery(question: string): string {
-  const q = (question ?? '').trim();
-  return q.replace(/\?+$/g, '').trim() || q;
 }

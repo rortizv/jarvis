@@ -1,21 +1,30 @@
-import { Injectable } from '@angular/core';
+import { Injectable, signal, computed } from '@angular/core';
 import { SpeechRecognitionService } from './speech-recognition.service';
 import { SpeechSynthesisService } from './speech-synthesis.service';
 import { ConversationService } from './conversation.service';
+import { normalizeText } from './utils/text.util';
+import { delay } from './utils/async.util';
 
 const JARVIS_TRIGGER = 'jarvis';
-const WELCOME_RESPONSE = 'Ingeniero, ¿cómo puedo servirte hoy?';
 const MIN_QUESTION_LENGTH = 5;
 const QUESTION_DEBOUNCE_MS = 1500;
 const WELCOME_COOLDOWN_MS = 2500;
+const WELCOME_TO_QUESTION_DELAY_MS = 400;
+/** Duración aproximada de reproducción (ms por carácter) para mantener "Hablando" visible; Azure resuelve speakTextAsync al acabar la síntesis, no la reproducción. */
+const MS_PER_CHAR_SPEECH = 70;
+const MIN_SPEAKING_MS = 1500;
+const MAX_SPEAKING_MS = 35000;
 
-type ListeningState = 'waitingForWakeWord' | 'awaitingQuestion';
+export type ListeningState = 'waitingForWakeWord' | 'awaitingQuestion';
 
 @Injectable({ providedIn: 'root' })
 export class VoiceService {
-  private isSpeaking = false;
+  readonly isSpeaking = signal(false);
+  private readonly stateSignal = signal<ListeningState>('waitingForWakeWord');
+  readonly listeningState = this.stateSignal.asReadonly();
+  readonly isAwaitingQuestion = computed(() => this.stateSignal() === 'awaitingQuestion');
+
   private listeningCallback: ((listening: boolean) => void) | null = null;
-  private state: ListeningState = 'waitingForWakeWord';
   private lastFinalInQuestion = '';
   private questionDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private lastWelcomeAt = 0;
@@ -25,7 +34,7 @@ export class VoiceService {
     private readonly synthesis: SpeechSynthesisService,
     private readonly conversation: ConversationService
   ) {
-    this.recognition.onResult((transcript, isFinal) => this.onTranscript(transcript, isFinal));
+    this.recognition.onResult((transcript, isFinal) => void this.onTranscript(transcript, isFinal));
     this.recognition.onStart(() => this.listeningCallback?.(true));
     this.recognition.onEnd(() => this.listeningCallback?.(false));
   }
@@ -34,19 +43,12 @@ export class VoiceService {
     this.listeningCallback = callback;
   }
 
-  private normalizeForMatch(text: string): string {
-    return text
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/\p{Diacritic}/gu, '');
-  }
-
   private includesJarvis(transcript: string): boolean {
-    return this.normalizeForMatch(transcript).includes(JARVIS_TRIGGER);
+    return normalizeText(transcript).includes(JARVIS_TRIGGER);
   }
 
   private looksLikeWelcomeEcho(text: string): boolean {
-    const n = this.normalizeForMatch(text);
+    const n = normalizeText(text);
     return (
       n.includes('ingeniero') ||
       (n.includes('servirte') && n.length < 50) ||
@@ -55,7 +57,7 @@ export class VoiceService {
   }
 
   private extractQuestion(transcript: string): string {
-    const n = this.normalizeForMatch(transcript);
+    const n = normalizeText(transcript);
     const withoutTrigger = n
       .replace(new RegExp(`\\b${JARVIS_TRIGGER}\\b`, 'gi'), '')
       .replace(/^\s*(hola\s+)?/, '')
@@ -79,27 +81,44 @@ export class VoiceService {
     this.processQuestion(q);
   }
 
+  /**
+   * Reproduce el texto y mantiene isSpeaking=true hasta que termine la reproducción estimada.
+   * Azure speakTextAsync resuelve al acabar la síntesis, no la reproducción, por eso prolongamos el estado.
+   */
+  private async speakAndHoldState(text: string): Promise<void> {
+    const estimatedMs = Math.min(MAX_SPEAKING_MS, Math.max(MIN_SPEAKING_MS, text.length * MS_PER_CHAR_SPEECH));
+    this.isSpeaking.set(true);
+    const start = Date.now();
+    try {
+      await this.synthesis.speak(text);
+    } finally {
+      const elapsed = Date.now() - start;
+      if (elapsed < estimatedMs) {
+        await delay(estimatedMs - elapsed);
+      }
+      this.isSpeaking.set(false);
+    }
+  }
+
   private async processQuestion(question: string): Promise<void> {
-    this.isSpeaking = true;
-    this.recognition.stop();
+    await this.recognition.stop();
     try {
       const responseText = await this.conversation.getResponse(question);
-      await this.synthesis.speak(responseText);
-      this.state = 'awaitingQuestion';
+      this.stateSignal.set('awaitingQuestion');
+      await this.speakAndHoldState(responseText);
     } catch (err) {
       console.error('VoiceService', err);
-      await this.synthesis.speak('Lo siento, no pude procesar. Intenta de nuevo.');
-      this.state = 'awaitingQuestion';
+      await this.speakAndHoldState('Lo siento, no pude procesar. Intenta de nuevo.');
+      this.stateSignal.set('awaitingQuestion');
     } finally {
-      this.isSpeaking = false;
-      this.recognition.start();
+      await this.recognition.start();
     }
   }
 
   private async onTranscript(transcript: string, isFinal: boolean): Promise<void> {
-    if (this.isSpeaking) return;
+    if (this.isSpeaking()) return;
 
-    if (this.state === 'awaitingQuestion') {
+    if (this.stateSignal() === 'awaitingQuestion') {
       const t = transcript.trim();
       if (t.length === 0) return;
       if (Date.now() - this.lastWelcomeAt < WELCOME_COOLDOWN_MS) return;
@@ -129,17 +148,15 @@ export class VoiceService {
 
     const question = this.extractQuestion(transcript);
     if (question.trim()) {
-      this.isSpeaking = true;
-      this.recognition.stop();
+      await this.recognition.stop();
       try {
         const responseText = await this.conversation.getResponse(question);
-        await this.synthesis.speak(responseText);
+        await this.speakAndHoldState(responseText);
       } catch (err) {
         console.error('VoiceService', err);
-        await this.synthesis.speak('Lo siento, no pude procesar. Intenta de nuevo.');
+        await this.speakAndHoldState('Lo siento, no pude procesar. Intenta de nuevo.');
       } finally {
-        this.isSpeaking = false;
-        this.recognition.start();
+        await this.recognition.start();
       }
       return;
     }
@@ -148,34 +165,33 @@ export class VoiceService {
   }
 
   /**
-   * No hacemos stop/start: dejamos el micrófono abierto para no perder el inicio de la pregunta.
-   * Pequeña pausa tras hablar para no captar eco de la propia voz como pregunta.
+   * Saludo natural desde el LLM; no hacemos stop/start para no perder el inicio de la pregunta.
    */
   private async speakWelcomeAndAwaitQuestion(): Promise<void> {
-    this.isSpeaking = true;
     try {
-      await this.synthesis.speak(WELCOME_RESPONSE);
-    } finally {
-      this.isSpeaking = false;
-      this.lastFinalInQuestion = '';
-      this.lastWelcomeAt = Date.now();
-      setTimeout(() => {
-        this.state = 'awaitingQuestion';
-      }, 400);
+      const greeting = await this.conversation.getGreeting();
+      await this.speakAndHoldState(greeting);
+    } catch (err) {
+      console.error('VoiceService greeting', err);
+      await this.speakAndHoldState('¿En qué puedo ayudarte?');
     }
+    this.lastFinalInQuestion = '';
+    this.lastWelcomeAt = Date.now();
+    await delay(WELCOME_TO_QUESTION_DELAY_MS);
+    this.stateSignal.set('awaitingQuestion');
   }
 
-  startListening(): void {
-    this.state = 'waitingForWakeWord';
+  async startListening(): Promise<void> {
+    this.stateSignal.set('waitingForWakeWord');
     this.lastFinalInQuestion = '';
     this.clearQuestionDebounce();
-    this.recognition.start();
+    await this.recognition.start();
   }
 
-  stopListening(): void {
+  async stopListening(): Promise<void> {
     this.clearQuestionDebounce();
-    this.recognition.stop();
-    this.state = 'waitingForWakeWord';
+    await this.recognition.stop();
+    this.stateSignal.set('waitingForWakeWord');
     this.lastFinalInQuestion = '';
     this.conversation.clearContext();
   }

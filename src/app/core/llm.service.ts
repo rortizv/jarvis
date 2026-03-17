@@ -2,6 +2,7 @@ import { Injectable } from '@angular/core';
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { firstValueFrom } from 'rxjs';
 import { environment } from '../../environments/environment';
+import type { AzureChatRequest, AzureChatResponse, AzureErrorBody, ChatMessage, ConversationMessage } from './models';
 
 const SYSTEM_PROMPT = `Eres Jarvis, un asistente de voz amable y conciso. Respondes en español.
 Reglas:
@@ -9,20 +10,6 @@ Reglas:
 - No uses listas ni markdown. Lenguaje natural y directo.
 - Si te dan contexto de Wikipedia o de búsqueda web (resultados recientes), úsalo para enriquecer la respuesta sin repetirlo todo.
 - Si hay mensajes anteriores en la conversación, usa ese contexto: no repitas lo que ya dijiste y responde a preguntas de seguimiento (ej. "y cuántos?", "y dónde?") usando lo ya hablado.`;
-
-interface AzureChatRequest {
-  messages: { role: string; content: string }[];
-  max_tokens: number;
-  temperature: number;
-}
-
-interface AzureChatResponse {
-  choices?: { message?: { content?: string } }[];
-}
-
-interface AzureErrorBody {
-  error?: { code?: string };
-}
 
 const AZURE_OPENAI_API_VERSION = '2024-04-01-preview';
 
@@ -45,7 +32,7 @@ export class LlmService {
   async chat(
     userMessage: string,
     wikiContext: string | null = null,
-    history: { role: 'user' | 'assistant'; content: string }[] = [],
+    history: ConversationMessage[] = [],
     webContext: string | null = null
   ): Promise<string> {
     if (!this.apiKey || !environment.azureOpenAI.endpoint) {
@@ -62,7 +49,7 @@ export class LlmService {
     }
 
     const historySlice = history.slice(-LlmService.MAX_HISTORY_MESSAGES);
-    const messages: { role: string; content: string }[] = [
+    const messages: ChatMessage[] = [
       { role: 'system', content: SYSTEM_PROMPT },
       ...historySlice.map((m) => ({ role: m.role, content: m.content })),
       { role: 'user', content },

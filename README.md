@@ -1,10 +1,49 @@
 # Jarvis
 
-Asistente de voz tipo Iron Man: se activa con la palabra **"Jarvis"** (o "Hola Jarvis"), escucha preguntas y responde por voz. Usa **Azure OpenAI** (LLM), **Wikipedia** para conceptos y **búsqueda web** (SearXNG o Bing) para hechos recientes o futuros.
+Asistente de voz tipo Iron Man: se activa con la palabra **"Jarvis"** (o "Hola Jarvis"), escucha preguntas y responde por voz. Usa **Azure OpenAI** (LLM), **Wikipedia** para conceptos y **búsqueda web** (SearXNG) para hechos recientes o futuros.
 
 - **Stack:** Angular 21, standalone, Tailwind, sin backend (todo en el cliente).
 - **Voz:** Azure AI Speech (STT + TTS) con fallback a Web Speech API del navegador.
-- **Datos:** Wikipedia (MediaWiki REST/API), búsqueda web (SearXNG recomendado, Bing opcional).
+- **Datos:** Wikipedia (MediaWiki REST/API), búsqueda web (SearXNG).
+
+---
+
+## Stack y patrones
+
+### Angular
+
+- **Angular 21**, componentes **standalone** (sin NgModules).
+- **`inject()`** en componentes y servicios (sin constructor para dependencias donde aplica).
+- **`effect()`** en el componente Jarvis para reaccionar al toggle y arrancar/parar el micrófono.
+
+### Signals
+
+El estado reactivo se maneja con **signals** y **computed**:
+
+| Dónde | Signal / computed | Uso |
+|-------|-------------------|-----|
+| **JarvisStore** | `isJarvisOn`, `isListening` | ON/OFF del asistente y si el micrófono está activo. |
+| **JarvisStore** | `isMicActive` (computed) | `isJarvisOn() && isListening()`. |
+| **VoiceService** | `isSpeaking` | True mientras Jarvis está hablando (TTS). |
+| **VoiceService** | `listeningState` (readonly) | `'waitingForWakeWord'` o `'awaitingQuestion'`. |
+| **VoiceService** | `isAwaitingQuestion` (computed) | True cuando se espera la pregunta (tras el saludo). |
+| **ConversationService** | `isLoading` | True mientras se obtiene respuesta (Wikipedia, búsqueda, LLM). |
+| **SpeechRecognitionService** | `isActive` | True cuando la sesión de reconocimiento está activa. |
+
+La vista usa estos signals para mostrar "Escuchando...", "Hablando...", "Pensando...", "Di tu pregunta" / "Di «Jarvis»".
+
+### Async / Promise
+
+- **VoiceService:** `startListening()` y `stopListening()` son **async** y hacen `await` a `recognition.start()` / `recognition.stop()`.
+- **SpeechRecognitionService:** `start()` y `stop()` devuelven **Promise** (en Azure se espera a que la sesión arranque o pare).
+- **ConversationService:** `getResponse()` es async; usa `isLoading.set(true/false)` en try/finally.
+- **Util `delay(ms)`** (`core/utils/async.util.ts`): pausas con `await delay(400)` en lugar de `setTimeout` con callbacks.
+
+### Organización del código
+
+- **Interfaces y tipos** en `core/models/index.ts` (Speech, conversación, LLM, MediaWiki, SearXNG); los servicios importan con `import type`.
+- **Utils** en `core/utils/`: `text.util.ts` (normalización de texto), `async.util.ts` (`delay`).
+- **HTTP:** una sola petición por flujo; se usa **Promise** (y `firstValueFrom` donde hace falta) en lugar de exponer Observables.
 
 ---
 
@@ -63,7 +102,7 @@ Usuario dice "Jarvis" o "Jarvis, ¿qué es React?"
         ▼
 ┌─────────────────────┐     ┌─────────────────────┐
 │ MediaWiki /         │     │ WebSearchService     │
-│ WebSearchService    │     │ (SearXNG o Bing)     │
+│ WebSearchService    │     │ (SearXNG)             │
 └─────────────────────┘     └─────────────────────┘
         │                              │
         └──────────────┬───────────────┘
@@ -90,15 +129,20 @@ jarvis/
 ├── src/
 │   ├── app/
 │   │   ├── core/                          # Servicios principales
-│   │   │   ├── voice.service.ts           # Orquesta STT → pregunta → conversación → TTS
-│   │   │   ├── conversation.service.ts   # Decide Wikipedia/web, llama LLM, mantiene historial
-│   │   │   ├── speech-recognition.service.ts  # STT: Azure o Web Speech API
+│   │   │   ├── models/                    # Interfaces (Speech, LLM, MediaWiki, SearXNG)
+│   │   │   │   └── index.ts
+│   │   │   ├── utils/
+│   │   │   │   ├── text.util.ts           # normalizeText()
+│   │   │   │   └── async.util.ts         # delay(ms)
+│   │   │   ├── voice.service.ts           # Orquesta STT → pregunta → conversación → TTS (signals: isSpeaking, listeningState)
+│   │   │   ├── conversation.service.ts   # Decide Wikipedia/web, llama LLM (signal: isLoading)
+│   │   │   ├── speech-recognition.service.ts  # STT (signal: isActive)
 │   │   │   ├── speech-synthesis.service.ts    # TTS: Azure o Web Speech API
 │   │   │   ├── azure-speech-loader.ts     # Carga del SDK de Azure Speech por CDN
 │   │   │   ├── llm.service.ts             # Cliente Azure OpenAI (chat)
 │   │   │   ├── mediawiki.service.ts       # Búsqueda + extracto Wikipedia
-│   │   │   ├── web-search.service.ts     # Búsqueda web: SearXNG y/o Bing
-│   │   │   └── heuristic.ts               # needsWikipedia(), needsRecentInfo(), etc.
+│   │   │   ├── web-search.service.ts     # Búsqueda web: SearXNG
+│   │   │   └── heuristic.ts               # needsWikipedia(), needsRecentInfo(), getSearchQuery()
 │   │   ├── features/jarvis/
 │   │   │   ├── jarvis.component.ts        # UI + toggle micrófono, enlace con VoiceService
 │   │   │   ├── jarvis.store.ts            # Estado (isJarvisOn, isListening) con signals
@@ -139,7 +183,6 @@ Angular **no** lee `.env` en runtime; la configuración va en los archivos `envi
 | `azureOpenAI.deployment` | environment | Nombre del deployment (ej. `gpt-4.1-mini`). |
 | `wikipediaLang` | environment | Código de idioma para Wikipedia (ej. `es`). |
 | `searxngBaseUrl` | environment | Base URL de SearXNG. En dev: `'/api/searxng'` (proxy). En prod: URL pública si aplica. |
-| `bingSearchKey` | environment | Opcional. Key de Bing Search v7 si no usas SearXNG o como fallback. |
 
 **Ejemplo** `environment.development.ts`:
 
@@ -194,9 +237,9 @@ La heurística (`needsWikipedia()` en `heuristic.ts`) decide si se llama a Wikip
 
 Para preguntas sobre pasado (última carrera, quién ganó, cuándo fue) o futuro (próximo GP, cuándo es, fecha, horario) se usa **búsqueda web**. La heurística `needsRecentInfo()` en `heuristic.ts` activa la búsqueda (patrones: último, anterior, pasado, próximo, siguiente, cuando fue, cuando es, etc.).
 
-**Prioridad en código:** 1) **SearXNG** (si `searxngBaseUrl`), 2) **Bing** (si `bingSearchKey`).
+La búsqueda web usa **SearXNG** (si `searxngBaseUrl` está configurado en el environment).
 
-### SearXNG (recomendado, gratis, open source)
+### SearXNG (gratis, open source)
 
 1. **Requisito:** Docker (o Docker Compose).
 2. **Levantar:** en la raíz del proyecto:
@@ -213,10 +256,6 @@ Para preguntas sobre pasado (última carrera, quién ganó, cuándo fue) o futur
 5. **Parar:** `docker compose down`.
 
 Para producción, despliega el mismo Compose y en `environment` pon la URL pública en `searxngBaseUrl`.
-
-### Bing (de pago)
-
-Crea un recurso "Bing Search v7" en Azure y pon la key en `bingSearchKey`. Se usa si no hay SearXNG configurado o como fallback si SearXNG falla.
 
 ### Si la búsqueda falla
 
@@ -239,7 +278,7 @@ Si `needsRecentInfo` es true pero la búsqueda no devuelve resultados (SearXNG c
 
 - Al decir "Jarvis" se recibe el saludo y se puede hacer una pregunta seguida.
 - Preguntas enciclopédicas usan Wikipedia cuando la heurística lo indica.
-- Preguntas de hechos recientes o futuros usan búsqueda web (SearXNG/Bing) cuando la heurística lo indica.
+- Preguntas de hechos recientes o futuros usan búsqueda web (SearXNG) cuando la heurística lo indica.
 - El LLM (Azure OpenAI) responde con contexto de Wikipedia o búsqueda cuando existe; si la búsqueda falla, no inventa datos.
 - La voz es configurable vía `azure.speechVoiceName`; sin Azure se usa Web Speech del navegador.
 - El historial de conversación se limpia al apagar el micrófono.

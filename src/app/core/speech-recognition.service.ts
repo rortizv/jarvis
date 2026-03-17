@@ -1,14 +1,12 @@
-import { Injectable } from '@angular/core';
+import { Injectable, signal } from '@angular/core';
 import { environment } from '../../environments/environment';
-
-export interface SpeechToTextProvider {
-  start(): void | Promise<void>;
-  stop(): void;
-  onResult(callback: (transcript: string, isFinal: boolean) => void): void;
-}
+import { SpeechToTextProvider } from './models';
+import { normalizeText } from './utils/text.util';
 
 @Injectable({ providedIn: 'root' })
 export class SpeechRecognitionService implements SpeechToTextProvider {
+  readonly isActive = signal(false);
+
   private resultCallback: ((transcript: string, isFinal: boolean) => void) | null = null;
   private startCallback: (() => void) | null = null;
   private endCallback: (() => void) | null = null;
@@ -25,6 +23,16 @@ export class SpeechRecognitionService implements SpeechToTextProvider {
     }
   }
 
+  private fireStart(): void {
+    this.isActive.set(true);
+    this.startCallback?.();
+  }
+
+  private fireEnd(): void {
+    this.isActive.set(false);
+    this.endCallback?.();
+  }
+
   private initWebSpeech(): void {
     const API = window.SpeechRecognition ?? (window as unknown as { webkitSpeechRecognition?: typeof SpeechRecognition }).webkitSpeechRecognition;
     if (!API) {
@@ -35,8 +43,8 @@ export class SpeechRecognitionService implements SpeechToTextProvider {
     this.webRecognition.continuous = true;
     this.webRecognition.interimResults = true;
     this.webRecognition.lang = 'es-CO';
-    this.webRecognition.onstart = () => this.startCallback?.();
-    this.webRecognition.onend = () => this.endCallback?.();
+    this.webRecognition.onstart = () => this.fireStart();
+    this.webRecognition.onend = () => this.fireEnd();
     this.webRecognition.onresult = (event: SpeechRecognitionEvent) => {
       if (!this.resultCallback) return;
       let transcript = '';
@@ -44,7 +52,7 @@ export class SpeechRecognitionService implements SpeechToTextProvider {
         transcript += event.results[i][0].transcript;
       }
       const isFinal = event.results[event.results.length - 1]?.isFinal ?? false;
-      const normalized = this.normalizeTranscript(transcript);
+      const normalized = normalizeText(transcript, true);
       if (normalized.length > 0) this.resultCallback(normalized, isFinal);
     };
   }
@@ -76,29 +84,21 @@ export class SpeechRecognitionService implements SpeechToTextProvider {
       recognizer.recognizing = (_: unknown, e: { result: { text: string } }) => {
         const text = e.result?.text?.trim();
         if (text && this.resultCallback) {
-          this.resultCallback(this.normalizeTranscript(text), false);
+          this.resultCallback(normalizeText(text, true), false);
         }
       };
       recognizer.recognized = (_: unknown, e: { result: { text: string } }) => {
         const text = e.result?.text?.trim();
         if (text && this.resultCallback) {
-          this.resultCallback(this.normalizeTranscript(text), true);
+          this.resultCallback(normalizeText(text, true), true);
         }
       };
-      recognizer.sessionStarted = () => this.startCallback?.();
-      recognizer.sessionStopped = () => this.endCallback?.();
+      recognizer.sessionStarted = () => this.fireStart();
+      recognizer.sessionStopped = () => this.fireEnd();
     } catch (err) {
       console.warn('Azure Speech no disponible, usando Web Speech.', err);
       this.initWebSpeech();
     }
-  }
-
-  private normalizeTranscript(text: string): string {
-    return text
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/\p{Diacritic}/gu, '')
-      .trim();
   }
 
   async start(): Promise<void> {
@@ -113,22 +113,36 @@ export class SpeechRecognitionService implements SpeechToTextProvider {
     if (this.azureReady) await this.azureReady;
     const r = this.azureRecognizer as { startContinuousRecognitionAsync: (onSuccess?: () => void, onErr?: (e: unknown) => void) => void } | null;
     if (r?.startContinuousRecognitionAsync) {
-      r.startContinuousRecognitionAsync(() => this.startCallback?.(), (e: unknown) => console.error(e));
+      await new Promise<void>((resolve, reject) => {
+        r.startContinuousRecognitionAsync(() => {
+          this.fireStart();
+          resolve();
+        }, (e: unknown) => {
+          console.error(e);
+          reject(e);
+        });
+      });
     }
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     if (this.webRecognition) {
       try {
         this.webRecognition.stop();
       } catch {
         // no-op
       }
+      this.fireEnd();
       return;
     }
     const r = this.azureRecognizer as { stopContinuousRecognitionAsync: (onSuccess?: () => void) => void } | null;
     if (r?.stopContinuousRecognitionAsync) {
-      r.stopContinuousRecognitionAsync(() => this.endCallback?.());
+      await new Promise<void>((resolve) => {
+        r.stopContinuousRecognitionAsync(() => {
+          this.fireEnd();
+          resolve();
+        });
+      });
     }
   }
 

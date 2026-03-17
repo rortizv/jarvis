@@ -1,13 +1,14 @@
-import { Injectable } from '@angular/core';
+import { Injectable, signal } from '@angular/core';
 import { MediawikiService } from './mediawiki.service';
 import { WebSearchService } from './web-search.service';
 import { LlmService } from './llm.service';
 import { needsWikipedia, needsRecentInfo, getSearchQuery } from './heuristic';
-
-export type ConversationMessage = { role: 'user' | 'assistant'; content: string };
+import type { ConversationMessage } from './models';
 
 @Injectable({ providedIn: 'root' })
 export class ConversationService {
+  readonly isLoading = signal(false);
+
   private history: ConversationMessage[] = [];
 
   constructor(
@@ -23,24 +24,46 @@ export class ConversationService {
     const question = userQuestion.trim();
     if (!question) return 'No escuché tu pregunta.';
 
-    let wikiContext: string | null = null;
-    let webContext: string | null = null;
+    this.isLoading.set(true);
+    try {
+      let wikiContext: string | null = null;
+      let webContext: string | null = null;
 
-    if (needsRecentInfo(question)) {
-      webContext = await this.webSearch.getContextForQuestion(question);
-      if (!webContext) {
-        console.warn('Jarvis: se intentó búsqueda web pero no hubo resultados. ¿SearXNG está en marcha? (docker compose up -d)');
-        webContext = '[No se pudo obtener búsqueda web. Responde brevemente que no tienes información actualizada para esta pregunta y que puede buscar en internet.]';
+      if (needsRecentInfo(question)) {
+        webContext = await this.webSearch.getContextForQuestion(question);
+        if (!webContext) {
+          console.warn('Jarvis: se intentó búsqueda web pero no hubo resultados. ¿SearXNG está en marcha? (docker compose up -d)');
+          webContext = '[No se pudo obtener búsqueda web. Responde brevemente que no tienes información actualizada para esta pregunta y que puede buscar en internet.]';
+        }
+      } else if (needsWikipedia(question)) {
+        const searchQuery = getSearchQuery(question);
+        wikiContext = await this.mediawiki.searchAndGetFirstSummary(searchQuery);
       }
-    } else if (needsWikipedia(question)) {
-      const searchQuery = getSearchQuery(question);
-      wikiContext = await this.mediawiki.searchAndGetFirstSummary(searchQuery);
-    }
 
-    const response = await this.llm.chat(question, wikiContext, this.history, webContext);
-    this.history.push({ role: 'user', content: question });
-    this.history.push({ role: 'assistant', content: response });
-    return response;
+      const response = await this.llm.chat(question, wikiContext, this.history, webContext);
+      this.history.push({ role: 'user', content: question });
+      this.history.push({ role: 'assistant', content: response });
+      return response;
+    } finally {
+      this.isLoading.set(false);
+    }
+  }
+
+  /**
+   * Saludo breve cuando el usuario solo dice "Jarvis". No se añade al historial.
+   */
+  async getGreeting(): Promise<string> {
+    this.isLoading.set(true);
+    try {
+      return await this.llm.chat(
+        'El usuario acaba de activarte diciendo Jarvis. Responde con un saludo breve y natural en una sola frase, sin listas.',
+        null,
+        [],
+        null
+      );
+    } finally {
+      this.isLoading.set(false);
+    }
   }
 
   /** Borra el contexto al apagar el micrófono. */

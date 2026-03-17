@@ -3,26 +3,9 @@ import { HttpClient } from '@angular/common/http';
 import { firstValueFrom, map, of } from 'rxjs';
 import { catchError } from 'rxjs/operators';
 import { environment } from '../../environments/environment';
+import type { WikiSearchPage, WikiSearchResponse, WikiExtractResponse } from './models';
 
 const LANG = environment.wikipediaLang || 'es';
-
-interface WikiSearchPage {
-  title?: string;
-  key?: string;
-  excerpt?: string;
-}
-
-interface WikiSearchResponse {
-  pages?: WikiSearchPage[];
-}
-
-interface WikiQueryPages {
-  [key: string]: { extract?: string };
-}
-
-interface WikiExtractResponse {
-  query?: { pages?: WikiQueryPages };
-}
 
 @Injectable({ providedIn: 'root' })
 export class MediawikiService {

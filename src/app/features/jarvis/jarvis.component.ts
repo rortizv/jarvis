@@ -1,6 +1,7 @@
 import { Component, inject, OnDestroy, effect } from '@angular/core';
 import { JarvisStore } from './jarvis.store';
 import { VoiceService } from '../../core/voice.service';
+import { ConversationService } from '../../core/conversation.service';
 
 @Component({
   selector: 'app-jarvis',
@@ -11,7 +12,8 @@ import { VoiceService } from '../../core/voice.service';
 })
 export class JarvisComponent implements OnDestroy {
   protected readonly store = inject(JarvisStore);
-  private readonly voice = inject(VoiceService);
+  protected readonly voice = inject(VoiceService);
+  protected readonly conversation = inject(ConversationService);
 
   constructor() {
     this.voice.onListeningChange((listening) => {
@@ -21,16 +23,16 @@ export class JarvisComponent implements OnDestroy {
     effect(() => {
       const on = this.store.isJarvisOn();
       if (on) {
-        this.voice.startListening();
+        void this.voice.startListening();
       } else {
-        this.voice.stopListening();
+        void this.voice.stopListening();
         this.store.stopListening();
       }
     });
   }
 
   ngOnDestroy(): void {
-    this.voice.stopListening();
+    void this.voice.stopListening();
     this.store.stopListening();
     this.store.isJarvisOn.set(false);
   }
