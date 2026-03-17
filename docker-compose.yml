@@ -1,0 +1,16 @@
+# SearXNG para Jarvis (búsqueda web local, sin API key).
+# Levantar: docker compose up -d
+# Parar:    docker compose down
+
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: jarvis-searxng
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./searxng/config:/etc/searxng
+      - ./searxng/data:/var/cache/searxng
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+    restart: unless-stopped
